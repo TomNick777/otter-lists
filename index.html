@@ -350,6 +350,16 @@
     let isSyncing = false;
     let syncTimer = null;
 
+    // ---- 删除追踪：记录已删除的 ID，合并时过滤 ----
+    let deletedIds = JSON.parse(localStorage.getItem('otter_deleted_ids') || '{"lists":[],"tasks":[]}');
+    function persistDeletedIds() {
+        localStorage.setItem('otter_deleted_ids', JSON.stringify(deletedIds));
+    }
+    function markDeleted(type, id) {
+        if (!deletedIds[type].includes(id)) deletedIds[type].push(id);
+        persistDeletedIds();
+    }
+
     // ---- 状态指示 ----
     function setStatus(text, type) {
         document.getElementById('syncText').textContent = text;
@@ -464,6 +474,9 @@
             mergeCloud(cloud);
             saveLocal();
             await pushCloud();
+            // 推送成功后清除已同步的删除记录
+            deletedIds = { lists: [], tasks: [] };
+            persistDeletedIds();
             setStatus('已同步', 'success');
             render();
         } catch (e) {
@@ -480,7 +493,17 @@
             const gist = await r.json();
             const file = gist.files[GIST_FILE];
             if (!file || !file.content) return null;
-            return JSON.parse(file.content);
+            const data = JSON.parse(file.content);
+            // 拉取云端的删除记录，合并到本地（两边都保留最完整的删除集合）
+            if (data.deletedIds) {
+                ['lists', 'tasks'].forEach(type => {
+                    (data.deletedIds[type] || []).forEach(id => {
+                        if (!deletedIds[type].includes(id)) deletedIds[type].push(id);
+                    });
+                });
+                persistDeletedIds();
+            }
+            return data;
         } catch (e) {
             return null;
         }
@@ -490,10 +513,13 @@
     function mergeCloud(cloud) {
         if (!cloud) return;
 
-        // 合并清单（按 ID，取 updatedAt 最新的）
+        // 合并清单（按 ID，取 updatedAt 最新的，过滤已删除）
         const listMap = new Map();
-        lists.forEach(l => listMap.set(l.id, l));
+        lists.forEach(l => {
+            if (!deletedIds.lists.includes(l.id)) listMap.set(l.id, l);
+        });
         (cloud.lists || []).forEach(cl => {
+            if (deletedIds.lists.includes(cl.id)) return; // 云端有但本地已删，跳过
             const local = listMap.get(cl.id);
             if (!local) {
                 listMap.set(cl.id, cl); // 云端独有的清单，加入
@@ -503,10 +529,13 @@
         });
         lists = Array.from(listMap.values());
 
-        // 合并任务（按 ID，取 updatedAt 最新的）
+        // 合并任务（按 ID，取 updatedAt 最新的，过滤已删除）
         const taskMap = new Map();
-        tasks.forEach(t => taskMap.set(t.id, t));
+        tasks.forEach(t => {
+            if (!deletedIds.tasks.includes(t.id)) taskMap.set(t.id, t);
+        });
         (cloud.tasks || []).forEach(ct => {
+            if (deletedIds.tasks.includes(ct.id)) return; // 云端有但本地已删，跳过
             const local = taskMap.get(ct.id);
             if (!local) {
                 taskMap.set(ct.id, ct); // 云端独有的任务，加入
@@ -531,6 +560,7 @@
         return JSON.stringify({
             lists,
             tasks,
+            deletedIds,
             version: Date.now()
         }, null, 2);
     }
@@ -732,7 +762,9 @@
         if (!l) return;
         const n = tasks.filter(t => t.category === lid).length;
         if (!confirm(n ? `删除「${l.name}」及其 ${n} 个任务？` : `删除清单「${l.name}」？`)) return;
-        tasks.forEach(t => { if (t.category === lid) t.category = 'inbox'; t.updatedAt = Date.now(); });
+        // 追踪删除：任务迁入收集箱，清单本身标记为删除
+        tasks.forEach(t => { if (t.category === lid) { t.category = 'inbox'; t.updatedAt = Date.now(); } });
+        markDeleted('lists', lid);
         lists = lists.filter(x => x.id !== lid);
         if (cat === lid) cat = 'inbox';
         saveAndSync();
@@ -901,7 +933,7 @@
         setP(t.priority);
         document.getElementById('modal').classList.add('open');
     }
-    function del(id) { if (confirm('删除此任务？')) { tasks = tasks.filter(t => t.id !== id); saveAndSync(); render(); } }
+    function del(id) { if (confirm('删除此任务？')) { markDeleted('tasks', id); tasks = tasks.filter(t => t.id !== id); saveAndSync(); render(); } }
     function openModal() { editId = null; document.getElementById('mTitle').textContent = '新任务'; document.getElementById('mTitleInput').value = ''; document.getElementById('mNote').value = ''; document.getElementById('mCat').value = cat === 'completed' ? 'inbox' : cat; document.getElementById('mDate').value = currentView === 'calendar' && selectedDate ? selectedDate : ''; setP('none'); document.getElementById('modal').classList.add('open'); }
     function closeModal(e) { if (e.target.id === 'modal') closeM(); }
     function closeM() { document.getElementById('modal').classList.remove('open'); }
